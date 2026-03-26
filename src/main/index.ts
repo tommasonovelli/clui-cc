@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain, dialog, screen, globalShortcut, Tray, Menu, nativeImage, nativeTheme, shell, systemPreferences } from 'electron'
+import { app, BrowserWindow, ipcMain, dialog, screen, globalShortcut, Tray, Menu, nativeImage, nativeTheme, shell, systemPreferences, session } from 'electron'
 import { join } from 'path'
 import { existsSync, readdirSync, statSync, createReadStream } from 'fs'
 import { createInterface } from 'readline'
@@ -13,6 +13,41 @@ import type { RunOptions, NormalizedEvent, EnrichedError } from '../shared/types
 
 const DEBUG_MODE = process.env.CLUI_DEBUG === '1'
 const SPACES_DEBUG = DEBUG_MODE || process.env.CLUI_SPACES_DEBUG === '1'
+
+function getContentSecurityPolicy(): string {
+  const isDev = !!process.env.ELECTRON_RENDERER_URL
+  const connectSrc = isDev
+    ? "connect-src 'self' ws://localhost:* http://localhost:*;"
+    : "connect-src 'self';"
+  const scriptSrc = isDev
+    ? "script-src 'self' 'unsafe-inline' 'unsafe-eval';"
+    : "script-src 'self';"
+
+  return [
+    "default-src 'none'",
+    scriptSrc,
+    "style-src 'self' 'unsafe-inline'",
+    "img-src 'self' data: blob:",
+    "media-src 'self' data: blob:",
+    "font-src 'self'",
+    connectSrc,
+    "object-src 'none'",
+    "base-uri 'none'",
+    "frame-src 'none'",
+  ].join('; ')
+}
+
+function installContentSecurityPolicy(): void {
+  const csp = getContentSecurityPolicy()
+  session.defaultSession.webRequest.onHeadersReceived((details, callback) => {
+    callback({
+      responseHeaders: {
+        ...details.responseHeaders,
+        'Content-Security-Policy': [csp],
+      },
+    })
+  })
+}
 
 function log(msg: string): void {
   _log('main', msg)
@@ -121,8 +156,11 @@ function createWindow(): void {
     icon: join(__dirname, '../../resources/icon.icns'),
     webPreferences: {
       preload: join(__dirname, '../preload/index.js'),
+      sandbox: true,
       contextIsolation: true,
       nodeIntegration: false,
+      webSecurity: true,
+      allowRunningInsecureContent: false,
     },
   })
   lastWindowBounds = mainWindow.getBounds()
@@ -131,6 +169,10 @@ function createWindow(): void {
   // but explicit flags ensure correct behavior on older Electron builds.
   mainWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true })
   mainWindow.setAlwaysOnTop(true, 'screen-saver')
+  mainWindow.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))
+  mainWindow.webContents.on('will-navigate', (event) => {
+    event.preventDefault()
+  })
 
   mainWindow.once('ready-to-show', () => {
     mainWindow?.show()
@@ -1056,6 +1098,8 @@ app.whenReady().then(async () => {
 
   // Request permissions upfront so the user is never interrupted mid-session.
   await requestPermissions()
+
+  installContentSecurityPolicy()
 
   // Skill provisioning — non-blocking, streams status to renderer
   ensureSkills((status: SkillStatus) => {
